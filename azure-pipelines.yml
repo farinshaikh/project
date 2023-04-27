@@ -1,19 +1,87 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+# Azure Databricks Build Pipeline
+# azure-pipelines.yml
 
 trigger:
 - master
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: ubuntu-20.04
 
 steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+- task: UsePythonVersion@0
+  displayName: 'Use Python 3.8'
+  inputs:
+    versionSpec: 3.8
+    addToPath: true
+- task: PipAuthenticate@1
+  displayName: 'Pip Authenticate'
 
 - script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+    pip install --upgrade pip
+    pip install pytest requests setuptools wheel
+    pip install pytest-cov
+    pip install pytest
+    pip install pytest pytest-azurepipelines
+    pip install -U databricks-connect==10.4.25
+  displayName: 'Load Python Dependencies'
+
+- script: |
+    echo "y
+    $(DATABRICKS_ADDRESS)
+    $(DATABRICKS_API_TOKEN)
+    $(DATABRICKS_CLUSTER_ID)
+    $(DATABRICKS_ORG_ID)
+    15001" | databricks-connect configure
+  displayName: 'Configure DBConnect'
+
+- checkout: self
+  persistCredentials: true
+  clean: true
+
+
+# For library code developed outside of an Azure Databricks notebook, the
+# process is like traditional software development practices. You write a
+# unit test using a testing framework, such as the Python pytest module, and
+# you use JUnit-formatted XML files to store the test results.
+- script: |
+    cd $(Build.SourcesDirectory)
+    python -m pytest --junit-xml=$(Build.Repository.LocalPath)/logs/TEST-LOCAL.xml $(Build.SourcesDirectory)/test.py || true
+  displayName: 'Run Python unit tests for library code'
+
+- task: PublishTestResults@2
+  inputs:
+    testResultsFiles: '**/TEST-*.xml'
+    failTaskOnFailedTests: true
+    publishRunAttachments: true
+
+- script: |
+    cd $(Build.SourcesDirectory)/package/libs
+    python3 setup.py sdist bdist_wheel
+    ls $(Build.SourcesDirectory)/package/libs/dist/
+  displayName: 'Build Python Wheel for Libs'
+
+- script: |
+    git diff --name-only --diff-filter=AMR HEAD^1 HEAD | xargs -I '{}' cp --parents -r '{}' $(Build.BinariesDirectory)
+
+    mkdir -p $(Build.BinariesDirectory)/package/libs
+    cp $(Build.SourcesDirectory)/package/libs/dist/*.* $(Build.BinariesDirectory)/package/libs
+
+    mkdir -p $(Build.BinariesDirectory)/notebooks
+    cp $(Build.Repository.LocalPath)/notebooks/*.* $(Build.BinariesDirectory)/notebooks
+
+    mkdir -p $(Build.BinariesDirectory)/cicd-scripts
+    cp $(Build.Repository.LocalPath)/cicd-scripts/*.* $(Build.BinariesDirectory)/cicd-scripts
+
+  displayName: 'Get Changes'
+
+- task: ArchiveFiles@2
+  inputs:
+    rootFolderOrFile: '$(Build.BinariesDirectory)'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+    replaceExistingArchive: true
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    ArtifactName: 'DatabricksBuild'
